@@ -116,10 +116,11 @@ class Url(object):
 class Package(Url):
     """Abstract a multi versionned package"""
 
-    def __init__(self, url, timeout):
+    def __init__(self, url, timeout, dl_agent):
         self.url = Url(url, timeout)
         self.sigurl = Url(url + SIG_EXT, timeout)
         self.timeout = timeout
+        self.dl_agent = dl_agent
         self.filename = basename(url)
         self.sigfilename = self.filename + SIG_EXT
         # regex is not strict, but we are not validating something here
@@ -158,14 +159,20 @@ class Package(Url):
                 raise Error("Local file %s already exists" % self.filename)
             if sign and exists(self.sigfilename):
                 raise Error("Local file %s already exists" % self.sigfilename)
-        self.url.download(self.filename)
-        if sign and self.sigurl.exists:
-            self.sigurl.download(self.sigfilename)
+
+        if self.dl_agent:
+            download_external(self.dl_agent, self.url.url, self.filename)
+            if sign and self.sigurl.exists:
+                download_external(self.dl_agent, self.sigurl.url, self.sigfilename)
+        else:
+            self.url.download(self.filename)
+            if sign and self.sigurl.exists:
+                self.sigurl.download(self.sigfilename)
 
 class Archive(object):
     """Abstract access to the package Archive"""
 
-    def __init__(self, url, timeout, update=1):
+    def __init__(self, url, timeout, dl_agent, update=1):
         """Init the Archive interface
         url of the archive (flat style)
         update = update the local index cache (0: never, 1: when needed, 2: always)
@@ -177,6 +184,7 @@ class Archive(object):
         self.remote_index = Url(self.url + INDEX_FILENAME, timeout)
         self.local_index = join(save_cache_path(NAME), INDEX_FILENAME)
         self.timeout = timeout
+        self.dl_agent = dl_agent
         if update > 0:
             self.update_index(update == 2)
         self._load_index()
@@ -187,7 +195,7 @@ class Archive(object):
         self._index = OrderedDict()
         for line in fd.readlines():
             key = line.decode().rstrip()
-            self._index[key] = Package("%s%s%s" % (self.url, key, PKG_EXT), self.timeout)
+            self._index[key] = Package("%s%s%s" % (self.url, key, PKG_EXT), self.timeout, self.dl_agent)
         debug("Index loaded: %s packages" % len(self._index))
 
     def update_index(self, force=False):
@@ -262,6 +270,14 @@ def pacman(args, asroot=True):
             error("Unable to execute as root: %s" % " ".join(cmd))
     debug("calling: %s" % cmd)
     call(cmd, close_fds=True)
+
+def download_external(dl_agent, url, filename):
+    cmd = dl_agent
+    cmd = cmd.replace('%o', filename)
+    cmd = cmd.replace('%u', url)
+    debug("calling: %s" % cmd)
+    if call(cmd.split(' ')):
+        error("External downloader failed: %s", cmd)
 
 def list_packages(packages, long=False):
     """display a list of packages on stdout"""
@@ -349,6 +365,8 @@ def parse_argv():
         help="display more information")
     p_main.add_argument("--url", help="archive URL, default: %s" % ARCHIVE_URL,
         default=environ.get("ARCHIVE_URL", ARCHIVE_URL))
+    p_main.add_argument("--dl-agent",
+        help="Use external downloader. Check makepkg.conf for reference.")
     p_main.add_argument("-t", "--timeout", default=10,
         help="connection timeout (default: 10s)")
     p_main.add_argument("--version", action="version",
@@ -373,7 +391,7 @@ def main():
         if args.debug:
             getLogger().setLevel(DEBUG)
         # init archive interface
-        archive = Archive(args.url, args.timeout, args.update)
+        archive = Archive(args.url, args.timeout, args.dl_agent, args.update)
         # select target pacakges
         packages = archive.search(args.package, args.version, args.release, args.arch)
         if len(packages) == 0:
